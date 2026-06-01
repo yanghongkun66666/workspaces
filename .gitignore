@@ -1,0 +1,40 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+
+# Java / Maven
+**/target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Go
+**/bin/
+*.exe
+*.out
+go/seckill-evolution-go-demo/seckill-evolution-go-demo
+
+# Node
+**/node_modules/
+**/dist/
+**/build/
+
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+**/.pytest_cache/
+**/.venv/
+**/venv/
