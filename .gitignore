@@ -18,12 +18,19 @@ Thumbs.db
 *.jar
 *.war
 *.ear
+java/seckill-evolution-java-demo/data/
 
 # Go
 **/bin/
 *.exe
 *.out
 go/seckill-evolution-go-demo/seckill-evolution-go-demo
+*.db
+*.db-shm
+*.db-wal
+
+# Accidental nested repos
+scientific-agent-skills/
 
 # Node
 **/node_modules/

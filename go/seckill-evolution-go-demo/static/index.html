@@ -101,13 +101,22 @@
 <div class="wrap">
     <section class="hero">
         <h1>Go 秒杀演进实验室</h1>
-        <p>这套页面和 Java 版保持同一组实验，方便你直接横向对比语言实现。建议先点按钮看结果，再回到 `main.go` 对照每个函数读并发控制思路。</p>
+        <p>这套页面现在走真实 MySQL 数据库，方便你直接对照 Java 版看两个语言里 `select / update / insert` 的并发行为有什么共性。</p>
+    </section>
+
+    <section class="card" style="margin-top: 18px;">
+        <h2>连接方式</h2>
+        <div class="hint">如果你是从 IDEA 或其他静态预览页打开本页面，`/api/...` 的相对路径会打到预览服务器本身，从而得到 404。把后端地址填成 `http://localhost:8090` 后再点保存即可。浏览器里的 `304` 只是静态资源缓存命中，不是后端错误。</div>
+        <div class="row">
+            <input id="apiBase" type="text" style="min-width: 320px;" placeholder="http://localhost:8090">
+            <button class="secondary" onclick="saveApiBase()">保存后端地址</button>
+        </div>
     </section>
 
     <section class="grid">
         <article class="card">
             <h2>超卖实验</h2>
-            <div class="hint">朴素版会故意放大并发窗口，通常能直观看到 `oversold: true`。乐观锁版则会稳定挡住超卖。</div>
+            <div class="hint">这两个按钮都走真实数据库。朴素版先 `select stock` 再回写，乐观锁版执行 `update ... where stock > 0`。</div>
             <div class="row">
                 <input id="oversellStock" type="number" value="5" min="1">
                 <input id="oversellRequests" type="number" value="30" min="1">
@@ -134,7 +143,7 @@
 
         <article class="card">
             <h2>异步落库实验</h2>
-            <div class="hint">接口先把订单放进队列，再由后台 goroutine 模拟“异步写数据库”。</div>
+            <div class="hint">接口先受理请求并放进队列，再由后台 goroutine 把订单写进数据库。这里的队列用来模拟 Redis Stream / MQ。</div>
             <div class="row">
                 <input id="asyncStock" type="number" value="4" min="1">
                 <button class="secondary" onclick="resetAsync()">Reset Async Demo</button>
@@ -149,12 +158,28 @@
 
     <section class="card" style="margin-top: 18px;">
         <h2>实验输出</h2>
-        <div class="hint">重点看 `oversold`、`duplicateOrder`、`acceptedOrders`、`persistedOrders`。</div>
+        <div class="hint">重点看 `oversold`、`duplicateOrder`、`storage`、`dbOrders`、`acceptedOrders`、`persistedOrders`。</div>
         <pre id="output">点击上面的按钮开始实验。</pre>
     </section>
 </div>
 
 <script>
+    function defaultApiBase() {
+        if (window.location.origin.includes('localhost:8090')) {
+            return '';
+        }
+        return localStorage.getItem('go-demo-api-base') || 'http://localhost:8090';
+    }
+
+    function apiUrl(path) {
+        return `${document.getElementById('apiBase').value.trim()}${path}`;
+    }
+
+    function saveApiBase() {
+        localStorage.setItem('go-demo-api-base', document.getElementById('apiBase').value.trim());
+        refreshAsync();
+    }
+
     function oversellPayload() {
         return {
             stock: Number(document.getElementById('oversellStock').value),
@@ -191,12 +216,12 @@
     }
 
     async function refreshAsync() {
-        const response = await fetch('/api/async/state');
+        const response = await fetch(apiUrl('/api/async/state'));
         show(await response.json());
     }
 
     async function post(url, payload) {
-        const response = await fetch(url, {
+        const response = await fetch(apiUrl(url), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -211,6 +236,7 @@
         document.getElementById('output').textContent = text;
     }
 
+    document.getElementById('apiBase').value = defaultApiBase();
     refreshAsync();
 </script>
 </body>
