@@ -1,6 +1,6 @@
 # seckill-evolution-java-demo
 
-一个可运行、可读代码、可直接复现实验的 Java 秒杀演进示例。
+一个可运行、可读代码、可直接复现实验的 Java 秒杀演进示例，当前版本默认连接本地 MySQL。
 
 ## 你能学到什么
 
@@ -22,9 +22,27 @@
 
 ## 运行
 
+先在项目目录里启动本项目专用 MySQL：
+
 ```bash
 cd /home/yhk/workspaces/java/seckill-evolution-java-demo
-mvn spring-boot:run
+docker compose up -d
+```
+
+再启动项目：
+
+```bash
+cd /home/yhk/workspaces/java/seckill-evolution-java-demo
+MYSQL_PORT=3307 mvn spring-boot:run
+```
+
+如果你在 IDEA 里启动，请在 Run Configuration 里添加环境变量：
+
+```text
+MYSQL_PORT=3307
+MYSQL_USER=root
+MYSQL_PASSWORD=200143
+MYSQL_DATABASE=seckill_demo
 ```
 
 启动后打开：
@@ -84,4 +102,4 @@ where voucher_id = ? and stock > 0
 
 ## 说明
 
-这里为了让你专注理解并发问题，没有接 MySQL / Redis，而是用可控的内存模型把问题和优化过程“放大”给你看。你学懂后，再把这些逻辑映射到真实数据库、Redis、MQ 就会很顺。
+当前示例已经接上真实 MySQL，所以你可以直接看到数据库里的库存行和订单行如何随着不同方案变化。异步落库中的 Redis / MQ 仍然是教学模拟，用内存队列来演示主链路快速返回、后台消费落库。

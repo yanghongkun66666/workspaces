@@ -1,13 +1,13 @@
 package com.yhk.seckilldemo;
 
 import jakarta.annotation.PreDestroy;
+import java.sql.ResultSet;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
@@ -15,11 +15,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
 public class SeckillDemoService {
 
+    private static final long VOUCHER_ID = 1L;
+
+    private final JdbcTemplate jdbcTemplate;
     private final ExecutorService pool = Executors.newFixedThreadPool(32);
     private final Map<String, Object> userLocks = new ConcurrentHashMap<>();
     private final BlockingQueue<QueuedOrder> asyncQueue = new LinkedBlockingQueue<>();
@@ -28,94 +32,115 @@ public class SeckillDemoService {
     private volatile boolean running = true;
     private final Thread consumerThread;
 
-    public SeckillDemoService() {
+    public SeckillDemoService(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        initializeVoucher(5);
         this.consumerThread = Thread.ofVirtual().name("async-order-consumer").start(this::drainAsyncOrders);
     }
 
     public Map<String, Object> simulateNaiveOversell(int stock, int requestCount) {
-        DemoState state = new DemoState(stock);
+        resetDatabase(stock);
+        List<String> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
         runConcurrently(requestCount, requestNo -> {
-            int observed = state.stock;
+            int observed = currentStock();
             if (observed <= 0) {
-                state.failures.add("request-" + requestNo + ": no stock");
+                failures.add("request-" + requestNo + ": no stock");
                 return;
             }
             sleep(15);
-            state.stock = observed - 1;
+            jdbcTemplate.update(
+                "update seckill_voucher set stock = ? where voucher_id = ?",
+                observed - 1, VOUCHER_ID
+            );
             sleep(5);
-            state.orders.add(new OrderRecord("order-" + requestNo, "user-" + requestNo, Instant.now().toString()));
+            insertOrder("order-" + requestNo, "user-" + requestNo);
         });
         return result(
             "naive-oversell",
-            "先查库存，再按旧值回写，故意放大并发窗口后就会出现超卖。",
-            state.initialStock,
+            "真实数据库版：先 select 库存，再按旧值 update 回写，所以并发下会超卖。",
+            stock,
             requestCount,
-            state
+            failures
         );
     }
 
     public Map<String, Object> simulateOptimisticStock(int stock, int requestCount) {
-        DemoState state = new DemoState(stock);
+        resetDatabase(stock);
+        List<String> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
         runConcurrently(requestCount, requestNo -> {
-            if (!state.decrementStockIfAvailable()) {
-                state.failures.add("request-" + requestNo + ": no stock");
+            int updated = jdbcTemplate.update(
+                "update seckill_voucher set stock = stock - 1 where voucher_id = ? and stock > 0",
+                VOUCHER_ID
+            );
+            if (updated == 0) {
+                failures.add("request-" + requestNo + ": no stock");
                 return;
             }
-            state.orders.add(new OrderRecord("order-" + requestNo, "user-" + requestNo, Instant.now().toString()));
+            insertOrder("order-" + requestNo, "user-" + requestNo);
         });
         return result(
             "optimistic-stock",
-            "用 stock > 0 的原子条件扣减来模拟数据库乐观锁，不会超卖。",
-            state.initialStock,
+            "真实数据库版：update ... where stock > 0，只会有库存充足的请求更新成功。",
+            stock,
             requestCount,
-            state
+            failures
         );
     }
 
     public Map<String, Object> simulateDuplicateOrdersWithoutUserLock(int stock, int requestCount, String userId) {
-        DemoState state = new DemoState(stock);
+        resetDatabase(stock);
+        List<String> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
         runConcurrently(requestCount, requestNo -> {
-            if (state.hasOrder(userId)) {
-                state.failures.add("request-" + requestNo + ": duplicate blocked");
+            if (hasOrder(userId)) {
+                failures.add("request-" + requestNo + ": duplicate blocked");
                 return;
             }
             sleep(15);
-            if (!state.decrementStockIfAvailable()) {
-                state.failures.add("request-" + requestNo + ": no stock");
+            int updated = jdbcTemplate.update(
+                "update seckill_voucher set stock = stock - 1 where voucher_id = ? and stock > 0",
+                VOUCHER_ID
+            );
+            if (updated == 0) {
+                failures.add("request-" + requestNo + ": no stock");
                 return;
             }
-            state.orders.add(new OrderRecord("order-" + requestNo, userId, Instant.now().toString()));
+            insertOrder("order-" + requestNo, userId);
         });
         return result(
             "duplicate-order",
-            "先查有没有订单，再创建订单，但这两个动作不是原子操作，所以同一用户会重复下单。",
-            state.initialStock,
+            "真实数据库版：先查订单再下单，但查和写不是原子操作，所以同一用户会重复下单。",
+            stock,
             requestCount,
-            state
+            failures
         );
     }
 
     public Map<String, Object> simulateOnePersonOneOrderWithUserLock(int stock, int requestCount, String userId) {
-        DemoState state = new DemoState(stock);
+        resetDatabase(stock);
+        List<String> failures = new java.util.concurrent.CopyOnWriteArrayList<>();
         runConcurrently(requestCount, requestNo -> {
             synchronized (lockForUser(userId)) {
-                if (state.hasOrder(userId)) {
-                    state.failures.add("request-" + requestNo + ": duplicate blocked");
+                if (hasOrder(userId)) {
+                    failures.add("request-" + requestNo + ": duplicate blocked");
                     return;
                 }
-                if (!state.decrementStockIfAvailable()) {
-                    state.failures.add("request-" + requestNo + ": no stock");
+                int updated = jdbcTemplate.update(
+                    "update seckill_voucher set stock = stock - 1 where voucher_id = ? and stock > 0",
+                    VOUCHER_ID
+                );
+                if (updated == 0) {
+                    failures.add("request-" + requestNo + ": no stock");
                     return;
                 }
-                state.orders.add(new OrderRecord("order-" + requestNo, userId, Instant.now().toString()));
+                insertOrder("order-" + requestNo, userId);
             }
         });
         return result(
             "one-person-one-order",
-            "对同一个 userId 加锁，让查询订单、扣库存、创建订单变成一个串行临界区。",
-            state.initialStock,
+            "真实数据库版：对同一个 userId 加锁，把查订单、扣库存、写订单包成串行临界区。",
+            stock,
             requestCount,
-            state
+            failures
         );
     }
 
@@ -123,6 +148,7 @@ public class SeckillDemoService {
         synchronized (asyncMonitor) {
             asyncQueue.clear();
             asyncState = new AsyncState(stock);
+            resetDatabase(stock);
         }
         return asyncState();
     }
@@ -130,18 +156,10 @@ public class SeckillDemoService {
     public Map<String, Object> submitAsyncOrder(String userId) {
         synchronized (asyncMonitor) {
             if (asyncState.stock <= 0) {
-                return Map.of(
-                    "success", false,
-                    "message", "库存不足",
-                    "state", snapshot(asyncState)
-                );
+                return Map.of("success", false, "message", "库存不足", "state", snapshot(asyncState));
             }
             if (asyncState.acceptedUsers.contains(userId)) {
-                return Map.of(
-                    "success", false,
-                    "message", "重复下单",
-                    "state", snapshot(asyncState)
-                );
+                return Map.of("success", false, "message", "重复下单", "state", snapshot(asyncState));
             }
             asyncState.stock -= 1;
             asyncState.acceptedUsers.add(userId);
@@ -150,7 +168,7 @@ public class SeckillDemoService {
             asyncQueue.offer(order);
             return Map.of(
                 "success", true,
-                "message", "抢购成功，订单异步落库中",
+                "message", "抢购成功，Redis/Lua 这一步在示例里用内存队列模拟，数据库落库在后台线程执行",
                 "orderId", order.orderId(),
                 "state", snapshot(asyncState)
             );
@@ -170,11 +188,64 @@ public class SeckillDemoService {
         pool.shutdownNow();
     }
 
+    private void initializeVoucher(int stock) {
+        jdbcTemplate.update(
+            "insert into seckill_voucher (voucher_id, stock) values (?, ?) on duplicate key update stock = values(stock)",
+            VOUCHER_ID, stock
+        );
+    }
+
+    private void resetDatabase(int stock) {
+        jdbcTemplate.update("delete from voucher_order");
+        initializeVoucher(stock);
+    }
+
+    private int currentStock() {
+        Integer value = jdbcTemplate.queryForObject(
+            "select stock from seckill_voucher where voucher_id = ?",
+            Integer.class,
+            VOUCHER_ID
+        );
+        return value == null ? 0 : value;
+    }
+
+    private boolean hasOrder(String userId) {
+        Integer count = jdbcTemplate.queryForObject(
+            "select count(*) from voucher_order where voucher_id = ? and user_id = ?",
+            Integer.class,
+            VOUCHER_ID,
+            userId
+        );
+        return count != null && count > 0;
+    }
+
+    private void insertOrder(String orderId, String userId) {
+        jdbcTemplate.update(
+            "insert into voucher_order (order_id, user_id, voucher_id, created_at) values (?, ?, ?, ?)",
+            orderId, userId, VOUCHER_ID, Timestamp.from(Instant.now())
+        );
+    }
+
+    private List<OrderRecord> loadOrders() {
+        return jdbcTemplate.query(
+            "select order_id, user_id, created_at from voucher_order order by created_at, order_id",
+            (ResultSet rs, int rowNum) -> new OrderRecord(
+                rs.getString("order_id"),
+                rs.getString("user_id"),
+                rs.getTimestamp("created_at").toInstant().toString()
+            )
+        );
+    }
+
     private void drainAsyncOrders() {
         while (running) {
             try {
                 QueuedOrder order = asyncQueue.take();
                 sleep(400);
+                jdbcTemplate.update(
+                    "insert into voucher_order (order_id, user_id, voucher_id, created_at) values (?, ?, ?, ?)",
+                    order.orderId(), order.userId(), VOUCHER_ID, Timestamp.from(Instant.parse(order.acceptedAt()))
+                );
                 synchronized (asyncMonitor) {
                     asyncState.persistedOrders.add(order);
                 }
@@ -187,19 +258,25 @@ public class SeckillDemoService {
         }
     }
 
-    private Map<String, Object> result(String scenario, String explanation, int stock, int requestCount, DemoState state) {
-        long uniqueUsers = state.orders.stream().map(OrderRecord::userId).distinct().count();
+    private Map<String, Object> result(String scenario, String explanation, int stock, int requestCount, List<String> failures) {
+        List<OrderRecord> orders = loadOrders();
+        long uniqueUsers = orders.stream().map(OrderRecord::userId).distinct().count();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("scenario", scenario);
         body.put("explanation", explanation);
         body.put("initialStock", stock);
         body.put("requestCount", requestCount);
-        body.put("successOrders", state.orders.size());
-        body.put("finalStock", state.stock);
-        body.put("oversold", state.orders.size() > stock);
-        body.put("duplicateOrder", uniqueUsers < state.orders.size());
-        body.put("orders", state.orders);
-        body.put("failures", state.failures);
+        body.put("successOrders", orders.size());
+        body.put("finalStock", currentStock());
+        body.put("oversold", orders.size() > stock);
+        body.put("duplicateOrder", uniqueUsers < orders.size());
+        body.put("orders", orders);
+        body.put("failures", failures);
+        body.put("storage", Map.of(
+            "database", "H2",
+            "voucherTable", "seckill_voucher",
+            "orderTable", "voucher_order"
+        ));
         return body;
     }
 
@@ -210,6 +287,7 @@ public class SeckillDemoService {
         body.put("acceptedOrders", new ArrayList<>(state.acceptedOrders));
         body.put("persistedOrders", new ArrayList<>(state.persistedOrders));
         body.put("queueSize", asyncQueue.size());
+        body.put("dbOrders", loadOrders());
         return body;
     }
 
@@ -225,6 +303,7 @@ public class SeckillDemoService {
             final int requestNo = i + 1;
             pool.submit(() -> {
                 ready.countDown();
+                await(ready);
                 await(start);
                 try {
                     worker.accept(requestNo);
@@ -233,7 +312,6 @@ public class SeckillDemoService {
                 }
             });
         }
-        await(ready);
         start.countDown();
         await(done);
     }
@@ -261,35 +339,9 @@ public class SeckillDemoService {
         void accept(int requestNo);
     }
 
-    private static final class DemoState {
-        private final int initialStock;
-        private final List<OrderRecord> orders = Collections.synchronizedList(new ArrayList<>());
-        private final List<String> failures = Collections.synchronizedList(new ArrayList<>());
-        private int stock;
-
-        private DemoState(int stock) {
-            this.initialStock = stock;
-            this.stock = stock;
-        }
-
-        private boolean decrementStockIfAvailable() {
-            synchronized (this) {
-                if (stock <= 0) {
-                    return false;
-                }
-                stock -= 1;
-                return true;
-            }
-        }
-
-        private boolean hasOrder(String userId) {
-            return orders.stream().anyMatch(order -> order.userId().equals(userId));
-        }
-    }
-
     private static final class AsyncState {
         private int stock;
-        private final Set<String> acceptedUsers = ConcurrentHashMap.newKeySet();
+        private final java.util.Set<String> acceptedUsers = ConcurrentHashMap.newKeySet();
         private final List<QueuedOrder> acceptedOrders = new ArrayList<>();
         private final List<QueuedOrder> persistedOrders = new ArrayList<>();
 

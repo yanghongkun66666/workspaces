@@ -117,13 +117,22 @@
 <div class="wrap">
     <section class="hero">
         <h1>Java 秒杀演进实验室</h1>
-        <p>这个页面把“超卖、乐观锁、一人一单、异步落库”都做成了可点击实验。你可以先在页面观察结果，再回到 Java 代码里对照 `SeckillDemoService` 一段段读。</p>
+        <p>这个页面现在走真实 MySQL 数据库。你可以看见 select、update、insert 这些数据库动作是怎么一步步导致超卖、又如何通过条件更新和用户锁解决问题的。</p>
+    </section>
+
+    <section class="card" style="margin-top: 18px;">
+        <h2>连接方式</h2>
+        <div class="hint">如果你是从 IDEA 的 HTML 预览页打开本页面，默认的相对路径会请求到 IDEA 自己的内置服务器，导致 `/api/...` 返回 404。把后端地址填成 `http://localhost:8080` 后再点保存即可。浏览器里看到 `304` 不是报错，它只是告诉你静态资源命中了缓存。</div>
+        <div class="row">
+            <input id="apiBase" type="text" style="min-width: 320px;" placeholder="http://localhost:8080">
+            <button class="secondary" onclick="saveApiBase()">保存后端地址</button>
+        </div>
     </section>
 
     <section class="grid">
         <article class="card">
             <h2>超卖实验</h2>
-            <div class="hint">先跑朴素版，再跑 `stock > 0` 版。通常你会看到前者 `successOrders` 大于 `initialStock`，后者不会。</div>
+            <div class="hint">这两个按钮都走真实数据库。朴素版会先 `select stock` 再 `update stock=?`，乐观锁版则会执行 `update ... where stock > 0`。</div>
             <div class="row">
                 <input id="oversellStock" type="number" value="5" min="1">
                 <input id="oversellRequests" type="number" value="30" min="1">
@@ -150,7 +159,7 @@
 
         <article class="card">
             <h2>异步落库实验</h2>
-            <div class="hint">提交成功后会先进入“已受理”，随后后台消费者再把订单写入“已落库”。这对应秒杀里主链路快速返回、后台异步持久化的思路。</div>
+            <div class="hint">这里主线程先受理请求并放入内存队列，后台线程再把订单写进数据库。示例里用队列模拟 Redis Stream / MQ，用 MySQL 模拟订单落库。</div>
             <div class="row">
                 <input id="asyncStock" type="number" value="4" min="1">
                 <button class="secondary" onclick="resetAsync()">Reset Async Demo</button>
@@ -165,12 +174,28 @@
 
     <section class="card" style="margin-top: 18px;">
         <h2>实验输出</h2>
-        <div class="hint">重点关注 `oversold`、`duplicateOrder`、`acceptedOrders`、`persistedOrders` 这些字段。</div>
+        <div class="hint">重点关注 `oversold`、`duplicateOrder`、`storage`、`dbOrders`、`acceptedOrders`、`persistedOrders` 这些字段。</div>
         <pre id="output">点击上面的按钮开始实验。</pre>
     </section>
 </div>
 
 <script>
+    function defaultApiBase() {
+        if (window.location.origin.includes('localhost:8080')) {
+            return '';
+        }
+        return localStorage.getItem('java-demo-api-base') || 'http://localhost:8080';
+    }
+
+    function apiUrl(path) {
+        return `${document.getElementById('apiBase').value.trim()}${path}`;
+    }
+
+    function saveApiBase() {
+        localStorage.setItem('java-demo-api-base', document.getElementById('apiBase').value.trim());
+        refreshAsync();
+    }
+
     function oversellPayload() {
         return {
             stock: Number(document.getElementById('oversellStock').value),
@@ -207,12 +232,12 @@
     }
 
     async function refreshAsync() {
-        const response = await fetch('/api/async/state');
+        const response = await fetch(apiUrl('/api/async/state'));
         show(await response.json());
     }
 
     async function post(url, payload) {
-        const response = await fetch(url, {
+        const response = await fetch(apiUrl(url), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -227,6 +252,7 @@
         document.getElementById('output').textContent = text;
     }
 
+    document.getElementById('apiBase').value = defaultApiBase();
     refreshAsync();
 </script>
 </body>
